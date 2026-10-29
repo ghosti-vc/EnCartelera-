@@ -5,8 +5,8 @@ const IMG = "https://image.tmdb.org/t/p/";
 const REGION = "MX";
 const LANG = "es-MX";
 
-// Una pestaña por plataforma (máximo 7, porque Kino permite 8 pestañas y la última es "Ya disponible").
-// "id"       = identificador de la pestaña (solo letras, números y guiones).
+// Plataformas que se muestran, en este orden.
+// "id"       = identificador (solo letras, números y guiones).
 // "provider" = id de TMDB para saber dónde está disponible un título.
 // "network"  = id de la cadena, sirve para las series que aún no salen.
 // "region"   = país donde se consulta (Hulu solo existe en EE. UU.).
@@ -21,17 +21,14 @@ const PLATFORMS = [
   { id: "paramount", name: "Paramount+", provider: "531", network: "4330" },
 ];
 
+const TAB_NOW = "disponible";
+const TAB_UP = "proximos";
+
 const MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function t(es, en) {
   return kino.lang === "en-US" ? en : es;
-}
-
-function tabList() {
-  return PLATFORMS.map((p) => ({ id: p.id, label: p.name })).concat([
-    { id: "disponible", label: t("Ya disponible", "Available now") },
-  ]);
 }
 
 function daysFrom(n) {
@@ -64,33 +61,6 @@ async function discover(kind, params, region) {
   const base = { language: LANG, include_adult: "false", watch_region: region || REGION };
   const data = await tmdb("/discover/" + kind, Object.assign(base, params));
   return Array.isArray(data.results) ? data.results : [];
-}
-
-function toItem(x, kind) {
-  const isMovie = kind === "movie";
-  const date = isMovie ? x.release_date : x.first_air_date;
-  const item = {
-    id: (isMovie ? "m" : "s") + x.id,
-    ref: (isMovie ? "movie:" : "tv:") + x.id,
-    title: String((isMovie ? x.title : x.name) || ""),
-    kind: isMovie ? "movie" : "series",
-    ids: { tmdb: x.id },
-  };
-  if (x.poster_path) item.poster = IMG + "w342" + x.poster_path;
-  if (x.backdrop_path) item.backdrop = IMG + "w780" + x.backdrop_path;
-  if (date && date.length >= 4) item.year = Number(date.slice(0, 4));
-  if (x.overview) item.overview = String(x.overview);
-  if (x.vote_average > 0) item.rating = Math.round(x.vote_average * 10) / 10;
-  const when = niceDate(date);
-  if (when) item.badges = [when];
-  return item;
-}
-
-function toItems(results, kind, max) {
-  return (results || [])
-    .filter((x) => x && x.id && (x.title || x.name))
-    .slice(0, max || 40)
-    .map((x) => toItem(x, kind));
 }
 
 // Parámetros de cada consulta (p = una plataforma de la lista)
@@ -131,15 +101,110 @@ function availableSeries(p) {
   };
 }
 
-// Corre varias consultas a la vez y arma una fila con cada una; las que fallan se omiten.
-// Cada fila lleva su "id" (Kino descarta las filas sin él).
+// mode: "now" = ya disponible, "up" = próximos estrenos. kind: "movie" o "tv".
+function fetchFor(mode, kind, p) {
+  if (mode === "up") {
+    return kind === "movie"
+      ? discover("movie", upcomingMovies(p), p.region)
+      : discover("tv", upcomingSeries(p), p.region);
+  }
+  return kind === "movie"
+    ? discover("movie", availableMovies(p), p.region)
+    : discover("tv", availableSeries(p), p.region);
+}
+
+function dateOf(x, kind) {
+  return (kind === "movie" ? x.release_date : x.first_air_date) || "";
+}
+
+// Texto que aparece al principio de la descripción: fecha y plataforma.
+function describe(mode, when, names) {
+  const where = names.join(", ");
+  if (mode === "up") {
+    return t(
+      "Estreno: " + when + (where ? " · en " + where : "") + ".",
+      "Release: " + when + (where ? " · on " + where : "") + "."
+    );
+  }
+  return t(
+    "Disponible" + (where ? " en " + where : "") + " (estreno: " + when + ").",
+    "Available" + (where ? " on " + where : "") + " (release: " + when + ")."
+  );
+}
+
+// names = plataformas donde está el título (puede ir vacío)
+function toItem(x, kind, names, mode) {
+  const isMovie = kind === "movie";
+  const date = dateOf(x, kind);
+  const when = niceDate(date);
+  const item = {
+    id: (isMovie ? "m" : "s") + x.id,
+    ref: (isMovie ? "movie:" : "tv:") + x.id,
+    title: String((isMovie ? x.title : x.name) || ""),
+    kind: isMovie ? "movie" : "series",
+    ids: { tmdb: x.id },
+  };
+  if (x.poster_path) item.poster = IMG + "w342" + x.poster_path;
+  if (x.backdrop_path) item.backdrop = IMG + "w780" + x.backdrop_path;
+  if (date.length >= 4) item.year = Number(date.slice(0, 4));
+  const plot = x.overview ? String(x.overview) : "";
+  item.overview = when ? describe(mode, when, names) + (plot ? "\n\n" + plot : "") : plot;
+  if (!item.overview) delete item.overview;
+  if (x.vote_average > 0) item.rating = Math.round(x.vote_average * 10) / 10;
+  const badges = names.slice(0, 2).map((n) => n.slice(0, 20));
+  if (when) badges.push(when);
+  if (badges.length) item.badges = badges;
+  return item;
+}
+
+function usable(results) {
+  return (results || []).filter((x) => x && x.id && (x.title || x.name));
+}
+
+// Junta las consultas de todas las plataformas en una sola lista, sin repetir títulos
+// (si un título está en varias plataformas, las anota todas).
+async function mergedItems(mode, kind) {
+  let lastError = null;
+  const lists = await Promise.all(
+    PLATFORMS.map(async (p) => {
+      try {
+        return { p, results: usable(await fetchFor(mode, kind, p)) };
+      } catch (e) {
+        lastError = e;
+        console.log("falló", p.id, e && e.message);
+        return { p, results: [] };
+      }
+    })
+  );
+  const byId = {};
+  const order = [];
+  lists.forEach((l) =>
+    l.results.forEach((x) => {
+      if (!byId[x.id]) {
+        byId[x.id] = { x, names: [] };
+        order.push(x.id);
+      }
+      byId[x.id].names.push(l.p.name);
+    })
+  );
+  if (!order.length && lastError) throw lastError;
+  const entries = order.map((id) => byId[id]);
+  if (mode === "now") {
+    entries.sort((a, b) => (b.x.popularity || 0) - (a.x.popularity || 0));
+  } else {
+    entries.sort((a, b) => (dateOf(a.x, kind) < dateOf(b.x, kind) ? -1 : 1));
+  }
+  return entries.slice(0, 40).map((e) => toItem(e.x, kind, e.names, mode));
+}
+
+// Corre varias consultas a la vez y arma una fila con cada una; las que fallan o vienen vacías se omiten.
+// Cada fila lleva su "id" (Kino descarta las filas sin él). job.load() devuelve los títulos ya armados.
 async function buildRows(jobs) {
   let lastError = null;
   const rows = await Promise.all(
     jobs.map(async (job) => {
       try {
-        const results = await job.load();
-        const items = toItems(results, job.kind);
+        const items = await job.load();
         if (!items.length) return null;
         const row = { id: job.id, title: job.title, items };
         if (job.genre) row.genre = job.genre;
@@ -161,7 +226,8 @@ async function buildRows(jobs) {
   return ok;
 }
 
-// Inicio de Kino: cuatro filas con todas las plataformas juntas
+// Inicio de Kino: primero "Ya disponible" (películas y series de todas las plataformas, cada título
+// con su plataforma y su fecha) y después los próximos estrenos en general.
 export async function home() {
   await null;
   const all = {
@@ -169,42 +235,42 @@ export async function home() {
     network: PLATFORMS.map((p) => p.network).join("|"),
   };
   return buildRows([
-    { id: "home-up-movies", title: t("Próximos estrenos: películas", "Upcoming movies"), genre: "peliculas", kind: "movie",
-      load: () => discover("movie", upcomingMovies(all)) },
-    { id: "home-up-series", title: t("Próximos estrenos: series", "Upcoming shows"), genre: "series", kind: "tv",
-      load: () => discover("tv", upcomingSeries(all)) },
-    { id: "home-now-movies", title: t("Ya disponible: películas", "Available now: movies"), genre: "peliculas", kind: "movie",
-      load: () => discover("movie", availableMovies(all)) },
-    { id: "home-now-series", title: t("Ya disponible: series", "Available now: shows"), genre: "series", kind: "tv",
-      load: () => discover("tv", availableSeries(all)) },
+    { id: "home-now-movies", title: t("Ya disponible: películas", "Available now: movies"), genre: "peliculas",
+      load: () => mergedItems("now", "movie") },
+    { id: "home-now-series", title: t("Ya disponible: series", "Available now: shows"), genre: "series",
+      load: () => mergedItems("now", "tv") },
+    { id: "home-up-movies", title: t("Próximos estrenos: películas", "Upcoming movies"), genre: "peliculas",
+      load: async () => usable(await discover("movie", upcomingMovies(all))).slice(0, 40).map((x) => toItem(x, "movie", [], "up")) },
+    { id: "home-up-series", title: t("Próximos estrenos: series", "Upcoming shows"), genre: "series",
+      load: async () => usable(await discover("tv", upcomingSeries(all))).slice(0, 40).map((x) => toItem(x, "tv", [], "up")) },
   ]);
 }
 
-// Sección propia: una pestaña por plataforma (con sus próximos estrenos de películas y de series)
-// y una última pestaña "Ya disponible". Kino manda { tab: null } la primera vez.
+// Sección propia: dos pestañas, "Ya disponible" (primera) y "Próximos estrenos".
+// En cada una las filas van ordenadas por plataforma: Netflix (películas y series), HBO Max, Disney+...
+// Kino manda { tab: null } la primera vez.
 export async function section(arg) {
   await null;
-  const tabs = tabList();
+  const tabs = [
+    { id: TAB_NOW, label: t("Ya disponible", "Available now") },
+    { id: TAB_UP, label: t("Próximos estrenos", "Upcoming") },
+  ];
   const wanted = arg && arg.tab;
   const current = tabs.filter((x) => x.id === wanted)[0] || tabs[0];
-  const index = tabs.indexOf(current);
-  let jobs = [];
-  if (index < PLATFORMS.length) {
-    const p = PLATFORMS[index];
-    jobs = [
-      { id: p.id + "-up-movies", title: t("Próximos estrenos: películas", "Upcoming movies"), kind: "movie",
-        load: () => discover("movie", upcomingMovies(p), p.region) },
-      { id: p.id + "-up-series", title: t("Próximos estrenos: series", "Upcoming shows"), kind: "tv",
-        load: () => discover("tv", upcomingSeries(p), p.region) },
-    ];
-  } else {
-    PLATFORMS.forEach((p) => {
-      jobs.push({ id: "now-" + p.id + "-movies", title: p.name + ": " + t("películas", "movies"), kind: "movie",
-        load: () => discover("movie", availableMovies(p), p.region) });
-      jobs.push({ id: "now-" + p.id + "-series", title: p.name + ": " + t("series", "shows"), kind: "tv",
-        load: () => discover("tv", availableSeries(p), p.region) });
+  const mode = current.id === TAB_UP ? "up" : "now";
+  const jobs = [];
+  PLATFORMS.forEach((p) => {
+    jobs.push({
+      id: mode + "-" + p.id + "-movies",
+      title: p.name + ": " + t("películas", "movies"),
+      load: async () => usable(await fetchFor(mode, "movie", p)).slice(0, 40).map((x) => toItem(x, "movie", [p.name], mode)),
     });
-  }
+    jobs.push({
+      id: mode + "-" + p.id + "-series",
+      title: p.name + ": " + t("series", "shows"),
+      load: async () => usable(await fetchFor(mode, "tv", p)).slice(0, 40).map((x) => toItem(x, "tv", [p.name], mode)),
+    });
+  });
   const rows = await buildRows(jobs);
   return { tabs, tab: current.id, rows };
 }
