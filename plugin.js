@@ -5,28 +5,31 @@ const IMG = "https://image.tmdb.org/t/p/";
 const REGION = "MX";
 const LANG = "es-MX";
 
-// Plataformas que se muestran. "provider" es el id de TMDB para ver dónde está disponible
-// un título; "network" es el id de la cadena, que sirve para las series que aún no salen.
+// Una pestaña por plataforma (máximo 7, porque Kino permite 8 pestañas y la última es "Ya disponible").
+// "provider" = id de TMDB para saber dónde está disponible un título.
+// "network"  = id de la cadena, sirve para las series que aún no salen.
+// "region"   = país donde se consulta (Hulu solo existe en EE. UU.).
 // Para agregar o quitar una plataforma, edita esta lista.
 const PLATFORMS = [
-  { name: "Netflix", provider: 8, network: "213" },
-  { name: "Prime Video", provider: 119, network: "1024" },
-  { name: "Disney+", provider: 337, network: "2739" },
-  { name: "Max", provider: 1899, network: "49|3186" },
-  { name: "Apple TV+", provider: 350, network: "2552" },
-  { name: "Paramount+", provider: 531, network: "4330" },
+  { name: "Netflix", provider: "8", network: "213" },
+  { name: "HBO Max", provider: "1899|384", network: "49|3186" },
+  { name: "Disney+", provider: "337", network: "2739" },
+  { name: "Prime Video", provider: "119", network: "1024" },
+  { name: "Hulu", provider: "15", network: "453", region: "US" },
+  { name: "Apple TV+", provider: "350", network: "2552" },
+  { name: "Paramount+", provider: "531", network: "4330" },
 ];
 
 function t(es, en) {
   return kino.lang === "en-US" ? en : es;
 }
 
+function availableTab() {
+  return t("Ya disponible", "Available now");
+}
+
 function tabNames() {
-  return [
-    t("Estrenos: películas", "Upcoming: movies"),
-    t("Estrenos: series", "Upcoming: shows"),
-    t("Ya disponible", "Available now"),
-  ];
+  return PLATFORMS.map((p) => p.name).concat([availableTab()]);
 }
 
 function daysFrom(n) {
@@ -47,8 +50,8 @@ async function tmdb(path, params) {
   return r || {};
 }
 
-async function discover(kind, params) {
-  const base = { language: LANG, include_adult: "false", watch_region: REGION };
+async function discover(kind, params, region) {
+  const base = { language: LANG, include_adult: "false", watch_region: region || REGION };
   const data = await tmdb("/discover/" + kind, Object.assign(base, params));
   return Array.isArray(data.results) ? data.results : [];
 }
@@ -77,27 +80,27 @@ function toItems(results, kind, max) {
     .map((x) => toItem(x, kind));
 }
 
-// Parámetros de cada consulta
-function upcomingMovies(provider) {
+// Parámetros de cada consulta (p = una plataforma de la lista)
+function upcomingMovies(p) {
   return {
-    with_watch_providers: String(provider),
+    with_watch_providers: p.provider,
     with_watch_monetization_types: "flatrate",
     "primary_release_date.gte": daysFrom(0),
     sort_by: "primary_release_date.asc",
   };
 }
 
-function upcomingSeries(network) {
+function upcomingSeries(p) {
   return {
-    with_networks: network,
+    with_networks: p.network,
     "first_air_date.gte": daysFrom(0),
     sort_by: "first_air_date.asc",
   };
 }
 
-function availableMovies(provider) {
+function availableMovies(p) {
   return {
-    with_watch_providers: String(provider),
+    with_watch_providers: p.provider,
     with_watch_monetization_types: "flatrate",
     "primary_release_date.gte": daysFrom(-60),
     "primary_release_date.lte": daysFrom(0),
@@ -105,9 +108,9 @@ function availableMovies(provider) {
   };
 }
 
-function availableSeries(provider) {
+function availableSeries(p) {
   return {
-    with_watch_providers: String(provider),
+    with_watch_providers: p.provider,
     with_watch_monetization_types: "flatrate",
     "first_air_date.gte": daysFrom(-90),
     "first_air_date.lte": daysFrom(0),
@@ -115,30 +118,21 @@ function availableSeries(provider) {
   };
 }
 
-export async function home() {
-  await null;
-  const providers = PLATFORMS.map((p) => p.provider).join("|");
-  const networks = PLATFORMS.map((p) => p.network).join("|");
-  const jobs = [
-    [t("Próximos estrenos: películas", "Upcoming movies"), "peliculas", "movie",
-      () => discover("movie", upcomingMovies(providers))],
-    [t("Próximos estrenos: series", "Upcoming shows"), "series", "tv",
-      () => discover("tv", upcomingSeries(networks))],
-    [t("Ya disponible: películas", "Available now: movies"), "peliculas", "movie",
-      () => discover("movie", availableMovies(providers))],
-    [t("Ya disponible: series", "Available now: shows"), "series", "tv",
-      () => discover("tv", availableSeries(providers))],
-  ];
+// Corre varias consultas a la vez y arma una fila con cada una; las que fallan se omiten.
+async function buildRows(jobs) {
   let lastError = null;
   const rows = await Promise.all(
     jobs.map(async (job) => {
       try {
-        const results = await job[3]();
-        const items = toItems(results, job[2] === "movie" ? "movie" : "tv");
-        return items.length ? { title: job[0], genre: job[1], items } : null;
+        const results = await job.load();
+        const items = toItems(results, job.kind);
+        if (!items.length) return null;
+        const row = { title: job.title, items };
+        if (job.genre) row.genre = job.genre;
+        return row;
       } catch (e) {
         lastError = e;
-        console.log("home: falló una fila", e && e.message);
+        console.log("falló una fila:", job.title, e && e.message);
         return null;
       }
     })
@@ -148,46 +142,51 @@ export async function home() {
   return ok;
 }
 
-// Una fila por plataforma dentro de cada pestaña de la sección propia
+// Inicio de Kino: cuatro filas con todas las plataformas juntas
+export async function home() {
+  await null;
+  const all = {
+    provider: PLATFORMS.map((p) => p.provider).join("|"),
+    network: PLATFORMS.map((p) => p.network).join("|"),
+  };
+  return buildRows([
+    { title: t("Próximos estrenos: películas", "Upcoming movies"), genre: "peliculas", kind: "movie",
+      load: () => discover("movie", upcomingMovies(all)) },
+    { title: t("Próximos estrenos: series", "Upcoming shows"), genre: "series", kind: "tv",
+      load: () => discover("tv", upcomingSeries(all)) },
+    { title: t("Ya disponible: películas", "Available now: movies"), genre: "peliculas", kind: "movie",
+      load: () => discover("movie", availableMovies(all)) },
+    { title: t("Ya disponible: series", "Available now: shows"), genre: "series", kind: "tv",
+      load: () => discover("tv", availableSeries(all)) },
+  ]);
+}
+
+// Sección propia: una pestaña por plataforma (con sus próximos estrenos de películas y de series)
+// y una última pestaña "Ya disponible".
 export async function section(arg) {
   await null;
   const tabs = tabNames();
   const tab = arg && tabs.indexOf(arg.tab) >= 0 ? arg.tab : tabs[0];
   const index = tabs.indexOf(tab);
-  let lastError = null;
-  const rows = await Promise.all(
-    PLATFORMS.map(async (p) => {
-      try {
-        let items = [];
-        if (index === 0) {
-          items = toItems(await discover("movie", upcomingMovies(p.provider)), "movie");
-        } else if (index === 1) {
-          items = toItems(await discover("tv", upcomingSeries(p.network)), "tv");
-        } else {
-          const both = await Promise.all([
-            discover("movie", availableMovies(p.provider)),
-            discover("tv", availableSeries(p.provider)),
-          ]);
-          const merged = both[0]
-            .map((x) => ({ x, kind: "movie" }))
-            .concat(both[1].map((x) => ({ x, kind: "tv" })))
-            .sort((a, b) => (b.x.popularity || 0) - (a.x.popularity || 0))
-            .slice(0, 30);
-          items = merged
-            .filter((m) => m.x && m.x.id && (m.x.title || m.x.name))
-            .map((m) => toItem(m.x, m.kind));
-        }
-        return items.length ? { title: p.name, items } : null;
-      } catch (e) {
-        lastError = e;
-        console.log("section: falló " + p.name, e && e.message);
-        return null;
-      }
-    })
-  );
-  const ok = rows.filter(Boolean);
-  if (!ok.length && lastError) throw lastError;
-  return { tabs, tab, rows: ok };
+  let jobs = [];
+  if (index < PLATFORMS.length) {
+    const p = PLATFORMS[index];
+    jobs = [
+      { title: t("Próximos estrenos: películas", "Upcoming movies"), kind: "movie",
+        load: () => discover("movie", upcomingMovies(p), p.region) },
+      { title: t("Próximos estrenos: series", "Upcoming shows"), kind: "tv",
+        load: () => discover("tv", upcomingSeries(p), p.region) },
+    ];
+  } else {
+    PLATFORMS.forEach((p) => {
+      jobs.push({ title: p.name + ": " + t("películas", "movies"), kind: "movie",
+        load: () => discover("movie", availableMovies(p), p.region) });
+      jobs.push({ title: p.name + ": " + t("series", "shows"), kind: "tv",
+        load: () => discover("tv", availableSeries(p), p.region) });
+    });
+  }
+  const rows = await buildRows(jobs);
+  return { tabs, tab, rows };
 }
 
 // Un catálogo sin video: las series no listan capítulos.
