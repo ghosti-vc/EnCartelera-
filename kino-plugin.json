@@ -1,7 +1,7 @@
 {
   "id": "encartelera",
   "name": "EnCartelera",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Próximos estrenos de películas y series de Netflix, HBO Max, Disney+, Prime Video, Hulu, Apple TV+ y Paramount+, y lo que ya está disponible.",
