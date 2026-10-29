@@ -44,10 +44,42 @@ async function tmdb(path, params) {
       userMessage: "Necesitas una versión más nueva de Kino para usar este plugin.",
     });
   }
-  let r = await kino.tmdb(path, params);
+  const raw = await callTmdb(path, params);
+  const data = unwrap(raw, 0);
+  console.log(
+    "tmdb " + path,
+    "recibido:", typeof raw,
+    "claves:", raw && typeof raw === "object" ? Object.keys(raw).slice(0, 8).join(",") : "-",
+    "resultados:", Array.isArray(data.results) ? data.results.length : "ninguno"
+  );
+  return data;
+}
+
+// Prueba la ruta con y sin "/" al inicio, por si Kino la espera de una forma u otra.
+async function callTmdb(path, params) {
+  try {
+    return await kino.tmdb(path, params);
+  } catch (e1) {
+    const alt = path.charAt(0) === "/" ? path.slice(1) : "/" + path;
+    try {
+      return await kino.tmdb(alt, params);
+    } catch (e2) {
+      throw e1;
+    }
+  }
+}
+
+// Saca la lista de resultados aunque la respuesta venga envuelta en otro objeto o como texto.
+function unwrap(r, depth) {
   if (r && typeof r.json === "function") r = r.json();
-  if (typeof r === "string") r = JSON.parse(r);
-  return r || {};
+  if (typeof r === "string") {
+    try { r = JSON.parse(r); } catch (e) { return {}; }
+  }
+  if (r && typeof r === "object" && !Array.isArray(r.results) && depth < 3) {
+    const inner = r.data || r.body || r.result || r.response;
+    if (inner) return unwrap(inner, depth + 1);
+  }
+  return r && typeof r === "object" ? r : {};
 }
 
 async function discover(kind, params, region) {
@@ -139,6 +171,11 @@ async function buildRows(jobs) {
   );
   const ok = rows.filter(Boolean);
   if (!ok.length && lastError) throw lastError;
+  if (!ok.length) {
+    throw kino.error("unavailable", "TMDB no devolvió resultados", {
+      userMessage: "No encontré estrenos por ahora. Intenta de nuevo en unos minutos.",
+    });
+  }
   return ok;
 }
 
