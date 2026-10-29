@@ -1,10 +1,10 @@
 {
   "id": "encartelera",
   "name": "EnCartelera",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Próximos estrenos y títulos ya disponibles en las plataformas de streaming, con películas y series por separado.",
+  "description": "Próximos estrenos de películas y series de Netflix, HBO Max, Disney+, Prime Video, Hulu, Apple TV+ y Paramount+, y lo que ya está disponible.",
   "homepage": "https://github.com/Ghosti-vc/encartelera",
   "hosts": ["api.themoviedb.org", "image.tmdb.org"],
   "capabilities": ["home", "episodes", "resolve"],
